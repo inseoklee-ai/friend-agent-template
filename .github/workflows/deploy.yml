@@ -50,8 +50,11 @@ jobs:
             COMMIT_SHA=${{ github.sha }}
             ENV=${{ vars.ENV }}
           flags: --service-account=${{ vars.RUNTIME_SA }} --startup-probe=httpGet.path=/health,periodSeconds=5,failureThreshold=12,timeoutSeconds=2
+          # 새 리비전은 트래픽 0%로 올리고 green 태그를 붙인다. 사용자는 이전 리비전을 계속 쓴다.
+          no_traffic: true
+          tag: green
 
       - name: 배포 결과
         run: |
-          echo "배포된 주소 ${{ steps.deploy.outputs.url }}"
+          echo "태그 URL(새 리비전만) ${{ steps.deploy.outputs.url }}"
           echo "배포한 이미지 $IMAGE"
