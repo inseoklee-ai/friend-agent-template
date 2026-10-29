@@ -74,6 +74,25 @@ jobs:
           echo "::error::스모크 테스트 실패: $TAG_URL 이 12번 동안 정상 응답하지 않았거나 커밋이 $EXPECTED 가 아님"
           exit 1
 
+      # 스모크 테스트를 통과한 새 리비전으로 트래픽 100%를 한 번에 옮긴다(블루그린).
+      # --to-latest 는 새 리비전으로 옮기면서 트래픽 고정도 푼다. 앞 단계가 실패하면 이 단계는 실행되지 않는다.
+      - name: 전환
+        env:
+          SERVICE: ${{ vars.SERVICE }}
+        run: |
+          svc=$(gcloud run services describe "$SERVICE" --region us-central1 --format=json)
+          previous=$(echo "$svc" | jq -r '[.status.traffic[] | select(.percent == 100)][0].revisionName')
+          green=$(echo "$svc" | jq -r '[.status.traffic[] | select(.tag == "green")][0].revisionName')
+          latest=$(echo "$svc" | jq -r '.status.latestReadyRevisionName')
+          echo "전환 전 트래픽 100% 리비전(롤백할 곳): $previous"
+          echo "새 리비전(green): $green"
+          if [ "$green" != "$latest" ]; then
+            echo "::error::가장 최근 리비전($latest)이 스모크 테스트한 리비전($green)과 달라 전환하지 않음"
+            exit 1
+          fi
+          gcloud run services update-traffic "$SERVICE" --region us-central1 --to-latest
+          echo "전환 완료: $previous -> $green"
+
       - name: 배포 결과
         run: |
           echo "태그 URL(새 리비전만) ${{ steps.deploy.outputs.url }}"
