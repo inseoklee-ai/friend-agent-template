@@ -54,6 +54,26 @@ jobs:
           no_traffic: true
           tag: green
 
+      # 트래픽 0%인 새 리비전만 태그 URL로 확인한다. 서비스 주소로 물으면 이전 리비전이 답한다.
+      # 끝까지 실패하면 exit 1 로 이 작업을 멈춰, 뒤의 전환 단계로 가지 않는다.
+      - name: 스모크 테스트
+        env:
+          TAG_URL: ${{ steps.deploy.outputs.url }}
+          EXPECTED: ${{ github.sha }}
+        run: |
+          for i in $(seq 1 12); do
+            health=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$TAG_URL/health" || true)
+            commit=$(curl -s --max-time 5 "$TAG_URL/version" | jq -r '.commit // empty' || true)
+            echo "시도 $i/12: $TAG_URL /health=$health commit=$commit"
+            if [ "$health" = "200" ] && [ "$commit" = "$EXPECTED" ]; then
+              echo "스모크 테스트 통과"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::스모크 테스트 실패: $TAG_URL 이 12번 동안 정상 응답하지 않았거나 커밋이 $EXPECTED 가 아님"
+          exit 1
+
       - name: 배포 결과
         run: |
           echo "태그 URL(새 리비전만) ${{ steps.deploy.outputs.url }}"
