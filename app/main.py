@@ -79,7 +79,8 @@ def home():
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    # 스테이지 6 시험용: 일부러 항상 503. 확인 뒤 Revert 한다.
+    return JSONResponse({"status": "ok"}, status_code=503)
 
 
 @app.get("/version")
