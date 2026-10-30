@@ -90,6 +90,9 @@ jobs:
             echo "::error::가장 최근 리비전($latest)이 스모크 테스트한 리비전($green)과 달라 전환하지 않음"
             exit 1
           fi
+          gcloud run services update-traffic "$SERVICE" --region us-central1 --to-tags green=50
+          echo "green 50%: 새 리비전 인스턴스가 켜지는 동안 이전 리비전이 절반을 받는다. 20초 대기"
+          sleep 20
           gcloud run services update-traffic "$SERVICE" --region us-central1 --to-latest
           echo "전환 완료: $previous -> $green"
 
