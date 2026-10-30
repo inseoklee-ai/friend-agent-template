@@ -1,0 +1,61 @@
+# production(friend-agent)의 트래픽 100%를 이전 리비전으로 되돌린다. Actions 탭의 Run workflow 버튼으로만 실행한다.
+# 리비전 이름을 넣으면 그 리비전으로, 비우면 지금 100% 리비전 바로 앞의 준비된 리비전으로 옮긴다.
+# 이미지를 다시 만들지 않고 트래픽 설정만 바꾸므로 몇 초 만에 끝난다. production 승인을 거친다.
+name: rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: "되돌아갈 리비전 이름 (비우면 바로 앞 리비전). 배포 로그의 '롤백할 곳' 이름을 넣는다"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      SERVICE: ${{ vars.SERVICE }}
+      TARGET: ${{ inputs.revision }}
+    steps:
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: 되돌아갈 리비전 정하기
+        run: |
+          current=$(gcloud run services describe "$SERVICE" --region us-central1 --format=json \
+            | jq -r '[.status.traffic[] | select(.percent == 100)][0].revisionName')
+          echo "지금 트래픽 100% 리비전: $current"
+          if [ -z "$TARGET" ]; then
+            # 준비 완료(Ready)된 리비전을 최신순으로 늘어놓고, 지금 리비전 바로 다음(더 오래된) 것을 고른다
+            TARGET=$(gcloud run revisions list --service "$SERVICE" --region us-central1 --format=json \
+              | jq -r --arg cur "$current" '
+                  [.[] | select(any(.status.conditions[]; .type == "Ready" and .status == "True"))]
+                  | sort_by(.metadata.creationTimestamp) | reverse
+                  | map(.metadata.name) | .[(index($cur) + 1)] // empty')
+          fi
+          if [ -z "$TARGET" ] || [ "$TARGET" = "$current" ]; then
+            echo "::error::되돌아갈 리비전을 찾지 못했거나 지금 리비전과 같음: '$TARGET'"
+            exit 1
+          fi
+          echo "되돌아갈 리비전: $TARGET"
+          echo "TARGET=$TARGET" >> "$GITHUB_ENV"
+
+      - name: 트래픽 옮기기
+        run: gcloud run services update-traffic "$SERVICE" --region us-central1 --to-revisions "$TARGET=100"
+
+      - name: 결과 확인
+        run: |
+          url=$(gcloud run services describe "$SERVICE" --region us-central1 --format='value(status.url)')
+          echo "$url/version"
+          curl -s --max-time 30 "$url/version"
+          echo
