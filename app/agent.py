@@ -85,7 +85,9 @@ def _run_turn(message, uid, llm, store, show_panel, seen):
             yield {"type": "turn", "tools": [], "confidence": None, "reason": "", "decided_by": "rule",
                    "action": "safety", "guards": guards}
         yield {"type": "delta", "text": CRISIS_REPLY}
-        saved = store.add_message(uid, "assistant", CRISIS_REPLY, {"action": "safety", "guards": guards})
+        saved = store.add_message(uid, "assistant", CRISIS_REPLY,
+                                  {"action": "safety", "guards": guards,
+                                   "trace_id": tracing.current_trace_id()})
         log("WARNING", "위기 표현 안전 응답")
         yield {"type": "done", "message_id": saved["id"]}
         return
@@ -138,8 +140,10 @@ def _run_turn(message, uid, llm, store, show_panel, seen):
                 yield {"type": "delta", "text": chunk}
             tracing.update(gen, output=reply, completion_start_time=first_at,
                            metadata={"first_token_ms": first_ms})
+        # trace_id 를 함께 저장해 둬야, 나중에 화면에서 누른 반응을 그 트레이스에 점수로 붙일 수 있다
         meta = {"tools": [t["name"] for t in choice.tools], "confidence": choice.confidence,
-                "action": choice.action, "guards": choice.guards}
+                "action": choice.action, "guards": choice.guards,
+                "trace_id": tracing.current_trace_id()}
         saved = store.add_message(uid, "assistant", reply, meta)
 
         # ⑤ 기억 정리

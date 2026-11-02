@@ -88,6 +88,27 @@ def attributes(**fields):
     return propagate_attributes(**fields)
 
 
+def current_trace_id():
+    """지금 열려 있는 트레이스의 ID. 반응을 점수로 붙일 때 쓰려고 메시지에 함께 저장한다."""
+    lf = client()
+    return lf.get_current_trace_id() if lf is not None else None
+
+
+def score(trace_id, name, value, comment=None):
+    """사용자 반응을 트레이스에 점수로 붙인다. 계측이 꺼져 있거나 트레이스 ID가 없으면 건너뛴다."""
+    lf = client()
+    if lf is None or not trace_id:
+        return False
+    try:
+        lf.create_score(name=name, value=value, trace_id=trace_id, data_type="BOOLEAN",
+                        comment=mask(data=comment) if comment else None)
+        lf.flush()
+        return True
+    except Exception as error:  # 점수 때문에 사용자 요청이 실패하지 않게 한다
+        log("WARNING", "Langfuse 점수 전송 실패", error=type(error).__name__)
+        return False
+
+
 def flush():
     """버퍼에 쌓인 기록을 지금 보낸다.
 
