@@ -9,7 +9,7 @@ from datetime import date, timedelta
 
 import httpx
 
-from app import when
+from app import tracing, when
 from app.logs import log
 
 TIMEOUT = 3.0  # 외부 API 한 번에 기다리는 최대 시간(초)
@@ -239,8 +239,13 @@ TOOLS = {
 
 
 def run_tool(name, args, ctx):
-    try:
-        return TOOLS[name]["run"](args, ctx)
-    except httpx.HTTPError as error:
-        log("WARNING", "외부 도구 호출 실패", tool=name, error=type(error).__name__)
-        return ToolResult(name, False, f"{TOOLS[name]['label']} 정보를 지금은 불러오지 못했습니다.")
+    # 도구마다 실패하는 이유가 달라서 관찰 단위를 도구 하나에 하나씩 남긴다
+    with tracing.observe(f"tool:{name}", input=args) as span:
+        try:
+            result = TOOLS[name]["run"](args, ctx)
+        except httpx.HTTPError as error:
+            log("WARNING", "외부 도구 호출 실패", tool=name, error=type(error).__name__)
+            result = ToolResult(name, False, f"{TOOLS[name]['label']} 정보를 지금은 불러오지 못했습니다.")
+        tracing.update(span, output={"ok": result.ok, "summary": result.summary, "data": result.data},
+                       metadata={"ok": result.ok})
+        return result
