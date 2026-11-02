@@ -6,3 +6,6 @@ import os
 
 os.environ.update({"LLM_PROVIDER": "fake", "LLM_API_KEY": "", "STORAGE": "memory", "AUTH": "none"})
 os.environ.setdefault("ENV", "test")
+
+# 테스트 트레이스를 Langfuse 로 보내지 않는다. 무료 플랜 한도를 쓰고 실제 기록과 섞인다.
+os.environ.update({"LANGFUSE_PUBLIC_KEY": "", "LANGFUSE_SECRET_KEY": ""})

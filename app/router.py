@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
-from app import when
+from app import tracing, when
 from app.logs import log
 from app.tools import CITIES, TOOLS
 
@@ -135,22 +135,27 @@ def model_choose(message, history, now, location, llm):
 
 
 def choose(message, history, now, location, llm):
-    if getattr(llm, "can_reason", False):
-        try:
-            result = model_choose(message, history, now, location, llm)
-        except Exception as error:  # 모델 응답이 형식에 맞지 않으면 규칙으로 대신한다
-            log("WARNING", "모델 도구 선택 실패, 키워드 규칙으로 대신함", error=type(error).__name__)
+    # 규칙이 고를 때는 모델을 부르지 않아 토큰이 0으로 남는다. 계측이 빠진 것과 헷갈리지 않게 decided_by 를 함께 남긴다.
+    with tracing.observe("choose-tools", as_type="generation", input=message) as gen:
+        if getattr(llm, "can_reason", False):
+            try:
+                result = model_choose(message, history, now, location, llm)
+            except Exception as error:  # 모델 응답이 형식에 맞지 않으면 규칙으로 대신한다
+                log("WARNING", "모델 도구 선택 실패, 키워드 규칙으로 대신함", error=type(error).__name__)
+                result = rule_choose(message, now, location)
+                result.guards.append("모델 응답을 읽지 못해 키워드 규칙으로 골랐습니다.")
+        else:
             result = rule_choose(message, now, location)
-            result.guards.append("모델 응답을 읽지 못해 키워드 규칙으로 골랐습니다.")
-    else:
-        result = rule_choose(message, now, location)
 
-    # 안전장치: 확신이 낮으면 도구를 쓰지 않고 되묻는다
-    if result.confidence < CONFIDENCE_THRESHOLD:
-        result.action = "clarify"
-        result.guards.append(f"확신도 {result.confidence:.2f}가 기준 {CONFIDENCE_THRESHOLD} 미만이라 도구를 쓰지 않고 되묻습니다.")
-        result.tools = []
+        # 안전장치: 확신이 낮으면 도구를 쓰지 않고 되묻는다
+        if result.confidence < CONFIDENCE_THRESHOLD:
+            result.action = "clarify"
+            result.guards.append(f"확신도 {result.confidence:.2f}가 기준 {CONFIDENCE_THRESHOLD} 미만이라 도구를 쓰지 않고 되묻습니다.")
+            result.tools = []
 
-    log("INFO", "도구 선택", tools=[t["name"] for t in result.tools], confidence=round(result.confidence, 2),
-        decided_by=result.decided_by, action=result.action)
-    return result
+        log("INFO", "도구 선택", tools=[t["name"] for t in result.tools], confidence=round(result.confidence, 2),
+            decided_by=result.decided_by, action=result.action)
+        tracing.update(gen, output={"tools": result.tools, "reason": result.reason},
+                       metadata={"confidence": result.confidence, "decided_by": result.decided_by,
+                                 "action": result.action, "guards": result.guards})
+        return result
