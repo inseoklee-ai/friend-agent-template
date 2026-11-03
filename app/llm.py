@@ -8,6 +8,8 @@ import json
 import re
 import time
 
+from app import tracing
+
 
 class OpenAICompatibleLLM:
     can_reason = True  # 도구 선택, 기억 정리를 모델에게 맡길 수 있다
@@ -18,6 +20,11 @@ class OpenAICompatibleLLM:
         self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=60)
         self.model = model
 
+    def _record(self, response):
+        """지금 열려 있는 generation 에 모델 이름과 토큰 수를 남긴다. 토큰이 없는 응답이면 0으로 둔다."""
+        usage = getattr(response, "usage", None)
+        tracing.record_usage(self.model, getattr(usage, "prompt_tokens", 0), getattr(usage, "completion_tokens", 0))
+
     def complete_json(self, system, user):
         """도구 선택처럼 정해진 형식의 답이 필요할 때. JSON 하나를 받아 dict로 돌려준다."""
         response = self.client.chat.completions.create(
@@ -25,16 +32,22 @@ class OpenAICompatibleLLM:
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
             response_format={"type": "json_object"},
         )
+        self._record(response)
         return json.loads(response.choices[0].message.content)
 
     def complete_text(self, messages):
         response = self.client.chat.completions.create(model=self.model, messages=messages)
+        self._record(response)
         return response.choices[0].message.content.strip()
 
     def chat_stream(self, messages):
         """답을 만들어지는 대로 조금씩 돌려준다(스트리밍)."""
-        response = self.client.chat.completions.create(model=self.model, messages=messages, stream=True)
+        # stream_options 를 켜야 스트리밍에서도 마지막에 토큰 수가 따라온다
+        response = self.client.chat.completions.create(model=self.model, messages=messages, stream=True,
+                                                       stream_options={"include_usage": True})
         for event in response:
+            if getattr(event, "usage", None):
+                self._record(event)
             if event.choices and event.choices[0].delta.content:
                 yield event.choices[0].delta.content
 
@@ -79,6 +92,11 @@ class ClaudeLLM:
         return dict(model=self.model, max_tokens=self.MAX_TOKENS, system=system, messages=turns,
                     output_config=self.OUTPUT_CONFIG, betas=self.BETAS, fallbacks="default")
 
+    def _record(self, response):
+        """지금 열려 있는 generation 에 모델 이름과 토큰 수를 남긴다. 토큰이 없는 응답이면 0으로 둔다."""
+        usage = getattr(response, "usage", None)
+        tracing.record_usage(self.model, getattr(usage, "input_tokens", 0), getattr(usage, "output_tokens", 0))
+
     def _text(self, response):
         if response.stop_reason == "refusal":
             return self.REFUSAL_NOTICE
@@ -88,13 +106,16 @@ class ClaudeLLM:
         """정해진 형식의 답이 필요할 때. 답에서 JSON 객체 하나를 찾아 dict로 돌려준다."""
         system = system + "\n\n반드시 JSON 객체 하나만 출력한다. 설명이나 코드 블록 표시는 붙이지 않는다."
         response = self.client.beta.messages.create(**self._request(system, [{"role": "user", "content": user}]))
+        self._record(response)
         if response.stop_reason == "refusal":
             raise ValueError("Claude가 요청을 거절했습니다.")
         return parse_json_object(self._text(response))
 
     def complete_text(self, messages):
         system, turns = self.to_claude(messages)
-        return self._text(self.client.beta.messages.create(**self._request(system, turns)))
+        response = self.client.beta.messages.create(**self._request(system, turns))
+        self._record(response)
+        return self._text(response)
 
     def chat_stream(self, messages):
         """답을 만들어지는 대로 조금씩 돌려준다(스트리밍)."""
@@ -104,7 +125,9 @@ class ClaudeLLM:
             for text in stream.text_stream:
                 sent = True
                 yield text
-            if stream.get_final_message().stop_reason == "refusal" and not sent:
+            final = stream.get_final_message()
+            self._record(final)
+            if final.stop_reason == "refusal" and not sent:
                 yield self.REFUSAL_NOTICE
 
 
@@ -130,6 +153,7 @@ class FakeLLM:
         self.delay = delay
 
     def _reply(self, messages):
+        tracing.record_usage(self.model, 0, 0)  # 모델을 부르지 않으므로 이름은 fake, 토큰은 0
         system = messages[0]["content"]
         polite = "존댓말" in system
         name = re.search(r"이름: (.+)", system)

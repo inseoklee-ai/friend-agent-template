@@ -6,7 +6,7 @@
 """
 import re
 
-from app import when
+from app import tracing, when
 from app.logs import log
 from app.safety import is_sensitive
 
@@ -77,6 +77,14 @@ def rule_extract(message):
 
 def update_memories(store, uid, user_message, reply, now, llm):
     """방금 턴에서 기억할 것을 뽑아 저장한다. 바뀐 내용을 돌려준다(화면 표시용)."""
+    with tracing.observe("memory-update", as_type="generation",
+                         input={"user": user_message, "assistant": reply}) as gen:
+        changes = _update_memories(store, uid, user_message, reply, now, llm)
+        tracing.update(gen, output={key: [m["text"] for m in value] for key, value in changes.items()})
+        return changes
+
+
+def _update_memories(store, uid, user_message, reply, now, llm):
     existing = store.list_memories(uid)
     if getattr(llm, "can_reason", False):
         listed = "\n".join(f"- id={m['id']} ({m['kind']}) {m['text']}" for m in existing) or "(없음)"
@@ -121,11 +129,14 @@ def maybe_summarize(store, uid, llm):
     batch = pending[:SUMMARIZE_BATCH]
     talk = "\n".join(f"{m['role']}: {m['content']}" for m in batch)
     previous = f"[기존 요약]\n{summary['text']}\n\n" if summary else ""
-    if getattr(llm, "can_reason", False):
-        text = llm.complete_text([{"role": "system", "content": SUMMARY_PROMPT},
-                                  {"role": "user", "content": f"{previous}[대화]\n{talk}"}])
-    else:
-        text = ((summary["text"] + " ") if summary else "") + f"메시지 {len(batch)}개를 주고받았다."
+    # 요약할 때만 열린다. 자주 일어나지 않아도 따로 이름을 붙여야 비용을 나눠 볼 때 빠지지 않는다.
+    with tracing.observe("memory-summary", as_type="generation", input=f"{previous}[대화]\n{talk}") as gen:
+        if getattr(llm, "can_reason", False):
+            text = llm.complete_text([{"role": "system", "content": SUMMARY_PROMPT},
+                                      {"role": "user", "content": f"{previous}[대화]\n{talk}"}])
+        else:
+            text = ((summary["text"] + " ") if summary else "") + f"메시지 {len(batch)}개를 주고받았다."
+        tracing.update(gen, output=text, metadata={"covered": len(batch)})
     store.save_summary(uid, text[:2000], batch[-1]["id"])
     log("INFO", "대화 요약 갱신", covered=len(batch))
     return True

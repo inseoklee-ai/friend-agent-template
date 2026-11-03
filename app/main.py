@@ -18,7 +18,7 @@ from fastapi import Depends, FastAPI, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from app import agent, ocr, when
+from app import agent, ocr, tracing, when
 from app.auth import Auth, User
 from app.config import ROOT, load_settings
 from app.llm import make_llm
@@ -66,6 +66,11 @@ class SettingsRequest(BaseModel):
 class ReportRequest(BaseModel):
     message_id: int
     reason: str = ""
+
+
+class FeedbackRequest(BaseModel):
+    message_id: int
+    helpful: bool
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -185,11 +190,30 @@ async def read_photo(photo: UploadFile, user: User = Depends(current_user)):
         raise HTTPException(500, str(error)) from error
 
 
+def trace_id_of(uid, message_id):
+    """내 캐릭터 메시지인지 확인하고 트레이스 ID를 꺼낸다.
+
+    recent_messages 가 로그인으로 확인한 user_id 로 거르므로, 남의 메시지는 여기서 걸린다.
+    """
+    for m in store.recent_messages(uid, 50):
+        if m["id"] == message_id and m["role"] == "assistant":
+            return m["meta"].get("trace_id")
+    raise HTTPException(404, "메시지를 찾을 수 없습니다")
+
+
+@app.post("/api/feedback")
+def feedback(req: FeedbackRequest, user: User = Depends(current_user)):
+    scored = tracing.score(trace_id_of(user.id, req.message_id), "user-feedback", 1 if req.helpful else 0)
+    log("INFO", "사용자 반응", message_id=req.message_id, helpful=req.helpful, scored=scored)
+    return {"ok": True, "scored": scored}
+
+
 @app.post("/api/report")
 def report(req: ReportRequest, user: User = Depends(current_user)):
-    # 지금은 로그로만 남긴다. 관측 도구를 붙이면 그 도구의 점수로 보낸다.
-    log("WARNING", "부적절한 답변 신고", message_id=req.message_id, reason_length=len(req.reason))
-    return {"ok": True}
+    # 신고 사유는 사용자가 쓴 글이라 원문을 로그에 남기지 않는다. Langfuse 점수의 comment 로만 보낸다.
+    scored = tracing.score(trace_id_of(user.id, req.message_id), "report", 1, comment=req.reason[:500])
+    log("WARNING", "부적절한 답변 신고", message_id=req.message_id, reason_length=len(req.reason), scored=scored)
+    return {"ok": True, "scored": scored}
 
 
 # ── 기억, 약속, 내 데이터 ───────────────────────────────────────────

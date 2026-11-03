@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.config import load_settings  # noqa: E402
 from app.llm import make_llm  # noqa: E402
-from app.router import model_choose, rule_choose  # noqa: E402
+from app.router import load_prompt, model_choose, rule_choose  # noqa: E402
 
 NOW = datetime.fromisoformat("2026-10-12T14:00:00+09:00")
 LOCATION = "서울"
@@ -47,13 +47,35 @@ def args_match(expected, actual):
     return wrong
 
 
+def covers_match(want, actual):
+    """기간 인자가 그 날짜를 품는지 본다.
+
+    기간을 기대 결과에 그대로 적으면 맞는 답도 틀린 것으로 센다. 인자를 비워 도구가
+    1년을 찾게 하는 것도 올바른 방법이기 때문이다. 확인할 것은 '그 기간 안에
+    다음 공휴일이 들어가는가' 하나다.
+    """
+    start, end = str(actual.get("from") or ""), str(actual.get("to") or "")
+    if not start and not end:
+        return []                      # 비워 두면 도구가 1년을 찾는다
+    if (start or "0000-01-01") <= want <= (end or "9999-12-31"):
+        return []
+    return [f"기간에 {want} 가 빠짐: from {start or '없음'}, to {end or '없음'}"]
+
+
+def option(name, default=None):
+    return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
+
+
 def main():
     use_rule = "--rule" in sys.argv
+    label = option("--label")
     llm = None if use_rule else make_llm(load_settings())
     if llm is not None and not llm.can_reason:
         print("LLM_PROVIDER=fake 에서는 모델 평가를 할 수 없습니다. --rule 로 실행하세요.")
         return
 
+    # --label 로 Langfuse 의 어느 버전으로 평가할지 고른다. 없으면 ENV 에 맞는 라벨
+    system = None if use_rule else load_prompt(label=label)[0]
     rows = [json.loads(line) for line in (ROOT / "data/eval/tool_selection.jsonl").read_text(encoding="utf-8").splitlines()]
     tool_ok = args_ok = 0
     failures = []
@@ -61,7 +83,7 @@ def main():
         if use_rule:
             choice = rule_choose(row["message"], NOW, LOCATION)
         else:
-            choice = model_choose(row["message"], row["history"], NOW, LOCATION, llm)
+            choice = model_choose(row["message"], row["history"], NOW, LOCATION, llm, system=system)
         picked = {t["name"] for t in choice.tools}
         required, optional = set(row["expected_tools"]), set(row["optional_tools"])
         tools_right = required <= picked <= required | optional
@@ -71,6 +93,8 @@ def main():
             got = {t["name"]: t["args"] for t in choice.tools}
             for name, expected in row["expected_args"].items():
                 wrong += args_match(expected, got.get(name, {}))
+            for name, day in row.get("expected_covers", {}).items():
+                wrong += covers_match(day, got.get(name, {}))
             if not wrong:
                 args_ok += 1
         if not tools_right or wrong:
@@ -81,6 +105,12 @@ def main():
     for row, picked, wrong, conf in failures:
         detail = "; ".join(wrong) if wrong else f"정답 {row['expected_tools'] or '도구 없음'}, 결과 {picked or '도구 없음'}"
         print(f"  {row['id']} {row['message']}  →  {detail}  (확신도 {conf:.2f})")
+
+    # 평가 게이트: 기준에 못 미치면 실패로 끝낸다. CI 에서 머지를 멈추는 데 쓴다.
+    min_tools, min_args = int(option("--min-tools", 0)), int(option("--min-args", 0))
+    if tool_ok < min_tools or args_ok < min_args:
+        print(f"기준 미달: 도구 {tool_ok} (기준 {min_tools}), 도구와 인자 {args_ok} (기준 {min_args})")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

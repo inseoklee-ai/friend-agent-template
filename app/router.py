@@ -4,11 +4,14 @@
 2. 안전장치: 확신도가 기준보다 낮으면 도구를 쓰지 않고 되묻는다(코드 규칙).
 fake 모드처럼 모델을 쓰지 않을 때나 모델 응답을 읽지 못했을 때는 키워드 규칙이 같은 형식으로 답한다.
 """
+import hashlib
+import json
+import os
 import re
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
-from app import when
+from app import tracing, when
 from app.logs import log
 from app.tools import CITIES, TOOLS
 
@@ -26,8 +29,16 @@ CANCEL_WORDS = ["취소", "지워", "없던 걸로", "안 알려 줘도", "안 �
 LIST_PATTERN = re.compile(r"(약속|알림|리마인드).*(뭐|목록|있어|있지|있었|보여|확인)")
 
 
-def router_prompt():
-    tools = "\n".join(f"- {name}: {t['desc']}. 인자 {t['args']}" for name, t in TOOLS.items())
+def tool_lines():
+    return "\n".join(f"- {name}: {t['desc']}. 인자 {t['args']}" for name, t in TOOLS.items())
+
+
+def router_prompt(tools=None):
+    """코드에 남겨 두는 기본 문장. Langfuse 에서 못 가져올 때 이것으로 고른다.
+
+    tools 에 "{{tools}}" 를 넣어 부르면 Langfuse 에 올릴 문장이 나온다. 손으로 옮겨 적지 않는다.
+    """
+    tools = tool_lines() if tools is None else tools
     return "\n".join([
         "너는 AI 친구 서비스에서 사용자 메시지에 답하기 전에 필요한 도구를 고르는 선택기다.",
         "쓸 수 있는 도구:",
@@ -57,6 +68,7 @@ class ToolChoice:
     decided_by: str                      # model, rule
     action: str = "answer"               # answer, clarify
     guards: list = field(default_factory=list)
+    variant: str = ""                    # A/B 테스트 그룹: a, b, 또는 빈 문자열
 
 
 # ── 키워드 규칙 ─────────────────────────────────────────────────────
@@ -112,17 +124,147 @@ def rule_choose(message, now, location):
 
 # ── 모델 ────────────────────────────────────────────────────────────
 
-def model_choose(message, history, now, location, llm):
+AB_SPLIT = 50   # 0~99 로 바꾼 값이 이보다 작으면 prod-a, 아니면 prod-b
+
+
+def ab_variant(uid):
+    """사용자 ID 로 A/B 그룹을 정한다. 같은 사용자는 늘 같은 그룹이다.
+
+    요청마다 무작위로 고르면 한 사용자의 대화 안에서 말투가 오락가락하고,
+    한 사람의 피드백이 두 버전에 섞여 비교를 망친다.
+    """
+    bucket = int(hashlib.sha256(str(uid).encode("utf-8")).hexdigest(), 16) % 100
+    return "a" if bucket < AB_SPLIT else "b"
+
+
+def ab_label(uid):
+    """A/B 테스트가 켜져 있고 사용자를 알 때만 prod-a / prod-b 라벨을 돌려준다."""
+    if os.environ.get("AB_TEST", "").strip().lower() != "on" or not uid:
+        return None
+    return f"prod-{ab_variant(uid)}"
+
+
+def load_prompt(label=None, uid=None):
+    """(고를 때 쓸 문장, 트레이스에 연결할 프롬프트 객체)를 돌려준다.
+
+    Langfuse 에 닿지 못하거나 변수를 채우지 못하면 코드의 기본 문장으로 돌아간다.
+    A/B 라벨을 가져오지 못하면 평소 라벨(ENV 에 맞는 것)로 돌아간다.
+    """
+    managed = None
+    if label is None:
+        ab = ab_label(uid)
+        if ab:
+            managed = tracing.prompt("router", label=ab)
+    if managed is None:
+        managed = tracing.prompt("router", label=label)
+    if managed is None:
+        return router_prompt(), None
+    try:
+        return managed.compile(tools=tool_lines()), managed
+    except Exception as error:
+        log("WARNING", "Langfuse 프롬프트를 채우지 못해 코드의 기본 문장을 씁니다", error=type(error).__name__)
+        return router_prompt(), None
+
+
+BACK_WORDS = {"이틀": 2, "사흘": 3, "나흘": 4}
+
+
+def days_back(text):
+    """'전날', '이틀 전'처럼 기준일에서 며칠을 빼라는 표현을 숫자로 바꾼다. 없으면 None."""
+    if re.search(r"전날|하루\s*전", text):
+        return 1
+    m = re.search(r"(이틀|사흘|나흘|\d+)\s*일?\s*전", text)
+    if not m:
+        return None
+    word = m.group(1)
+    return BACK_WORDS.get(word) or int(word)
+
+
+def fix_relative_due(result, message, now):
+    """기준일에서 날짜를 빼는 계산을 코드가 대신한다.
+
+    모델은 '금요일'과 '밤' 같은 표현은 잘 읽지만 거기서 하루를 빼는 계산은 자주 틀린다.
+    지시문에 계산 방법을 적어도(router 버전 2, 3) 여섯 번 중 한 번만 맞았다.
+    요일을 날짜로 바꾸는 일은 when.parse_when 이 [달력]과 같은 방식으로 한다.
+    """
+    back = days_back(message)
+    if back is None:
+        return
+    base = when.parse_when(message, now)
+    if base is None:
+        return
+    due = (base - timedelta(days=back)).isoformat()
+    for t in result.tools:
+        if t["name"] == "create_reminder" and t["args"].get("due_at"):
+            before = str(t["args"]["due_at"])
+            if before[:10] != due[:10]:
+                t["args"]["due_at"] = due
+                result.guards.append(f"기준일에서 {back}일 앞으로 코드가 다시 계산했습니다: {before} → {due}")
+
+
+def fix_time_of_day(result, message, now):
+    """'아침', '밤' 같은 때 표현의 시각을 코드가 맞춘다. 날짜는 모델이 낸 값을 그대로 둔다.
+
+    when.PARTS 가 '아침 08:00' 처럼 기준을 갖고 있는데 모델은 09:00 으로 내는 일이 있다.
+    시각만 바꾸고 날짜는 건드리지 않아, 날짜를 잘 읽은 항목이 깨지지 않게 한다.
+    """
+    if re.search(r"\d{1,2}\s*시", message):
+        return                       # 몇 시라고 분명히 말했으면 그 값을 쓴다
+    part = next((p for p in when.PARTS if p in message), None)
+    if part is None:
+        return
+    hour = when.PARTS[part]
+    for t in result.tools:
+        if t["name"] != "create_reminder" or not t["args"].get("due_at"):
+            continue
+        raw = str(t["args"]["due_at"])
+        try:
+            due = datetime.fromisoformat(raw)
+        except ValueError:
+            continue
+        if (due.hour, due.minute) == (hour, 0):
+            continue
+        t["args"]["due_at"] = due.replace(hour=hour, minute=0).isoformat()
+        result.guards.append(f"'{part}' 의 시각을 코드가 맞췄습니다: {raw} → {t['args']['due_at']}")
+
+
+# '12월', '설날', '올해'처럼 찾을 기간을 말하는 표현. 없으면 기간을 정하지 않는다.
+PERIOD_PATTERN = re.compile(r"\d{1,2}\s*월|설날|추석|신정|올해|내년|작년|연말|이번\s*(주|달|해)|다음\s*(주|달|해)")
+
+
+def fix_holiday_range(result, message):
+    """기간을 말하지 않은 공휴일 질문이면 from, to 를 비운다.
+
+    get_holidays 는 인자가 없으면 오늘부터 1년을 찾는다. '다음 공휴일'처럼 기간이 없는 질문에
+    모델이 이번 달까지로 좁히는 바람에 다음 공휴일이 빠지곤 했다.
+    지시문에 규칙을 더해 봤지만(router 버전 2, 4) 다른 도구에까지 호출을 덧붙이게 만들어 되돌렸다.
+    """
+    if PERIOD_PATTERN.search(message):
+        return
+    for t in result.tools:
+        if t["name"] != "get_holidays":
+            continue
+        narrowed = {k: t["args"].pop(k) for k in ("from", "to") if k in t["args"]}
+        if narrowed:
+            result.guards.append(f"기간을 말하지 않은 질문이라 조회 기간을 비웠습니다: {narrowed}")
+
+
+def model_choose(message, history, now, location, llm, system=None):
     recent = "\n".join(f"{m['role']}: {m['content']}" for m in history[-4:]) or "(없음)"
     user = (f"[지금] {now.isoformat()} ({when.WEEKDAYS[now.weekday()]}요일)\n[달력]\n{when.calendar_hint(now)}\n"
             f"[사용자 지역] {location}\n[최근 대화]\n{recent}\n\n[메시지]\n{message}")
-    data = llm.complete_json(router_prompt(), user)
+    data = llm.complete_json(system or router_prompt(), user)
     tools = []
     for t in data.get("tools") or []:
         if isinstance(t, dict) and t.get("name") in TOOLS:
             tools.append({"name": t["name"], "args": t.get("args") if isinstance(t.get("args"), dict) else {}})
     confidence = max(0.0, min(1.0, float(data.get("confidence", 0))))
     result = ToolChoice(tools[:MAX_TOOLS], confidence, str(data.get("reason", "")), "model")
+
+    # 안전장치: '시험 전날'처럼 기준일에서 날짜를 빼는 계산은 코드가 한다
+    fix_relative_due(result, message, now)
+    fix_time_of_day(result, message, now)
+    fix_holiday_range(result, message)
 
     # 안전장치: 지난 연도로 적힌 날짜는 올해로 고친다
     for t in result.tools:
@@ -134,23 +276,48 @@ def model_choose(message, history, now, location, llm):
     return result
 
 
-def choose(message, history, now, location, llm):
-    if getattr(llm, "can_reason", False):
-        try:
-            result = model_choose(message, history, now, location, llm)
-        except Exception as error:  # 모델 응답이 형식에 맞지 않으면 규칙으로 대신한다
-            log("WARNING", "모델 도구 선택 실패, 키워드 규칙으로 대신함", error=type(error).__name__)
+def choose(message, history, now, location, llm, uid=None):
+    # 규칙이 고를 때는 모델을 부르지 않아 토큰이 0으로 남는다. 계측이 빠진 것과 헷갈리지 않게 decided_by 를 함께 남긴다.
+    with tracing.observe("choose-tools", as_type="generation", input=message) as gen:
+        if getattr(llm, "can_reason", False):
+            system, managed = load_prompt(uid=uid)
+            if managed is not None:
+                tracing.update(gen, prompt=managed)  # 트레이스에 어느 버전으로 골랐는지 남는다
+            result_variant = ab_label(uid)
+            try:
+                result = model_choose(message, history, now, location, llm, system=system)
+            except Exception as error:  # 모델 응답이 형식에 맞지 않으면 규칙으로 대신한다
+                log("WARNING", "모델 도구 선택 실패, 키워드 규칙으로 대신함", error=type(error).__name__)
+                result = rule_choose(message, now, location)
+                result.guards.append("모델 응답을 읽지 못해 키워드 규칙으로 골랐습니다.")
+        else:
             result = rule_choose(message, now, location)
-            result.guards.append("모델 응답을 읽지 못해 키워드 규칙으로 골랐습니다.")
-    else:
-        result = rule_choose(message, now, location)
+            result_variant = None
+        if result_variant:
+            result.variant = result_variant.removeprefix("prod-")
 
-    # 안전장치: 확신이 낮으면 도구를 쓰지 않고 되묻는다
-    if result.confidence < CONFIDENCE_THRESHOLD:
-        result.action = "clarify"
-        result.guards.append(f"확신도 {result.confidence:.2f}가 기준 {CONFIDENCE_THRESHOLD} 미만이라 도구를 쓰지 않고 되묻습니다.")
-        result.tools = []
+        # 안전장치: 같은 도구를 같은 인자로 두 번 고르면 뒤엣것을 버린다.
+        # 외부 API를 두 번 부르는 시간과 토큰만 더 든다. 인자가 다르면(두 도시 날씨) 그대로 둔다.
+        # 지시문에 "두 번 고르지 말라"고 적어 봤지만 지켜지지 않았고, 오히려 다른 항목에 중복이 생겼다.
+        seen, unique = set(), []
+        for tool in result.tools:
+            key = (tool["name"], json.dumps(tool["args"], sort_keys=True, ensure_ascii=False))
+            if key in seen:
+                result.guards.append(f"{tool['name']} 을 같은 인자로 두 번 골라 하나만 남겼습니다.")
+                continue
+            seen.add(key)
+            unique.append(tool)
+        result.tools = unique
 
-    log("INFO", "도구 선택", tools=[t["name"] for t in result.tools], confidence=round(result.confidence, 2),
-        decided_by=result.decided_by, action=result.action)
-    return result
+        # 안전장치: 확신이 낮으면 도구를 쓰지 않고 되묻는다
+        if result.confidence < CONFIDENCE_THRESHOLD:
+            result.action = "clarify"
+            result.guards.append(f"확신도 {result.confidence:.2f}가 기준 {CONFIDENCE_THRESHOLD} 미만이라 도구를 쓰지 않고 되묻습니다.")
+            result.tools = []
+
+        log("INFO", "도구 선택", tools=[t["name"] for t in result.tools], confidence=round(result.confidence, 2),
+            decided_by=result.decided_by, action=result.action)
+        tracing.update(gen, output={"tools": result.tools, "reason": result.reason},
+                       metadata={"confidence": result.confidence, "decided_by": result.decided_by,
+                                 "action": result.action, "guards": result.guards})
+        return result
