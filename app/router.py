@@ -4,7 +4,9 @@
 2. 안전장치: 확신도가 기준보다 낮으면 도구를 쓰지 않고 되묻는다(코드 규칙).
 fake 모드처럼 모델을 쓰지 않을 때나 모델 응답을 읽지 못했을 때는 키워드 규칙이 같은 형식으로 답한다.
 """
+import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -66,6 +68,7 @@ class ToolChoice:
     decided_by: str                      # model, rule
     action: str = "answer"               # answer, clarify
     guards: list = field(default_factory=list)
+    variant: str = ""                    # A/B 테스트 그룹: a, b, 또는 빈 문자열
 
 
 # ── 키워드 규칙 ─────────────────────────────────────────────────────
@@ -121,12 +124,39 @@ def rule_choose(message, now, location):
 
 # ── 모델 ────────────────────────────────────────────────────────────
 
-def load_prompt(label=None):
+AB_SPLIT = 50   # 0~99 로 바꾼 값이 이보다 작으면 prod-a, 아니면 prod-b
+
+
+def ab_variant(uid):
+    """사용자 ID 로 A/B 그룹을 정한다. 같은 사용자는 늘 같은 그룹이다.
+
+    요청마다 무작위로 고르면 한 사용자의 대화 안에서 말투가 오락가락하고,
+    한 사람의 피드백이 두 버전에 섞여 비교를 망친다.
+    """
+    bucket = int(hashlib.sha256(str(uid).encode("utf-8")).hexdigest(), 16) % 100
+    return "a" if bucket < AB_SPLIT else "b"
+
+
+def ab_label(uid):
+    """A/B 테스트가 켜져 있고 사용자를 알 때만 prod-a / prod-b 라벨을 돌려준다."""
+    if os.environ.get("AB_TEST", "").strip().lower() != "on" or not uid:
+        return None
+    return f"prod-{ab_variant(uid)}"
+
+
+def load_prompt(label=None, uid=None):
     """(고를 때 쓸 문장, 트레이스에 연결할 프롬프트 객체)를 돌려준다.
 
     Langfuse 에 닿지 못하거나 변수를 채우지 못하면 코드의 기본 문장으로 돌아간다.
+    A/B 라벨을 가져오지 못하면 평소 라벨(ENV 에 맞는 것)로 돌아간다.
     """
-    managed = tracing.prompt("router", label=label)
+    managed = None
+    if label is None:
+        ab = ab_label(uid)
+        if ab:
+            managed = tracing.prompt("router", label=ab)
+    if managed is None:
+        managed = tracing.prompt("router", label=label)
     if managed is None:
         return router_prompt(), None
     try:
@@ -246,13 +276,14 @@ def model_choose(message, history, now, location, llm, system=None):
     return result
 
 
-def choose(message, history, now, location, llm):
+def choose(message, history, now, location, llm, uid=None):
     # 규칙이 고를 때는 모델을 부르지 않아 토큰이 0으로 남는다. 계측이 빠진 것과 헷갈리지 않게 decided_by 를 함께 남긴다.
     with tracing.observe("choose-tools", as_type="generation", input=message) as gen:
         if getattr(llm, "can_reason", False):
-            system, managed = load_prompt()
+            system, managed = load_prompt(uid=uid)
             if managed is not None:
                 tracing.update(gen, prompt=managed)  # 트레이스에 어느 버전으로 골랐는지 남는다
+            result_variant = ab_label(uid)
             try:
                 result = model_choose(message, history, now, location, llm, system=system)
             except Exception as error:  # 모델 응답이 형식에 맞지 않으면 규칙으로 대신한다
@@ -261,6 +292,9 @@ def choose(message, history, now, location, llm):
                 result.guards.append("모델 응답을 읽지 못해 키워드 규칙으로 골랐습니다.")
         else:
             result = rule_choose(message, now, location)
+            result_variant = None
+        if result_variant:
+            result.variant = result_variant.removeprefix("prod-")
 
         # 안전장치: 같은 도구를 같은 인자로 두 번 고르면 뒤엣것을 버린다.
         # 외부 API를 두 번 부르는 시간과 토큰만 더 든다. 인자가 다르면(두 도시 날씨) 그대로 둔다.
