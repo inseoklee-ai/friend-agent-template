@@ -88,6 +88,34 @@ def attributes(**fields):
     return propagate_attributes(**fields)
 
 
+def _in_span():
+    """지금 열려 있는 관찰 단위가 있는지. 없을 때 SDK 함수를 부르면 오류 줄이 찍힌다.
+
+    scripts/eval_tools.py 처럼 app/llm.py 를 직접 부르는 코드는 트레이스 밖에서 돈다.
+    """
+    from opentelemetry import trace as otel_trace
+
+    return otel_trace.get_current_span().get_span_context().is_valid
+
+
+def prompt(name, label=None):
+    """Langfuse 에 둔 프롬프트를 가져온다. 못 가져오면 None 이고, 부른 쪽이 코드의 기본 문장을 쓴다.
+
+    라벨은 ENV 로 정한다. production 환경만 production 라벨을 보고, 나머지는 staging 라벨을 본다.
+    배포는 라벨을 옮기는 일이고 롤백도 같다. 코드를 다시 배포하지 않는다.
+    """
+    lf = client()
+    if lf is None:
+        return None
+    label = label or ("production" if os.environ.get("ENV", "local").strip() == "production" else "staging")
+    try:
+        return lf.get_prompt(name, label=label)
+    except Exception as error:  # Langfuse 에 닿지 못해도 서비스는 답해야 한다
+        log("WARNING", "Langfuse 프롬프트를 가져오지 못해 코드의 기본 문장을 씁니다",
+            name=name, label=label, error=type(error).__name__)
+        return None
+
+
 def current_trace_id():
     """지금 열려 있는 트레이스의 ID. 반응을 점수로 붙일 때 쓰려고 메시지에 함께 저장한다."""
     lf = client()
@@ -167,7 +195,7 @@ def record_usage(model, input_tokens, output_tokens):
     app/llm.py 의 세 클래스가 모두 이 함수를 불러서, 제공자를 바꿔도 기록이 빠지지 않는다.
     """
     lf = client()
-    if lf is None:
+    if lf is None or not _in_span():
         return
     try:
         lf.update_current_generation(
