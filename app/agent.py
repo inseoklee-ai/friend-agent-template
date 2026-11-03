@@ -93,7 +93,7 @@ def _run_turn(message, uid, llm, store, show_panel, seen):
         return
 
     # ② 도구 선택
-    choice = choose(message, history, now, settings["location"], llm)
+    choice = choose(message, history, now, settings["location"], llm, uid=uid)
     if show_panel:
         yield {"type": "turn", "tools": [{"name": t["name"], "label": TOOLS[t["name"]]["label"], "args": t["args"]}
                                          for t in choice.tools],
@@ -101,6 +101,8 @@ def _run_turn(message, uid, llm, store, show_panel, seen):
                "action": choice.action, "guards": choice.guards}
     seen.update(tools=[t["name"] for t in choice.tools], confidence=choice.confidence,
                 decided_by=choice.decided_by, action=choice.action)
+    if choice.variant:
+        seen["ab_variant"] = choice.variant   # Tracing 화면에서 그룹별로 걸러 보려고 남긴다
 
     # 태그는 관찰 단위를 만들 때만 붙으므로, 고른 도구를 안 뒤부터 걸어 준다
     tags = [f"tool:{t['name']}" for t in choice.tools] or ["no-tool"]

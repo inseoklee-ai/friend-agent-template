@@ -62,11 +62,13 @@ def covers_match(want, actual):
     return [f"기간에 {want} 가 빠짐: from {start or '없음'}, to {end or '없음'}"]
 
 
+def option(name, default=None):
+    return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
+
+
 def main():
     use_rule = "--rule" in sys.argv
-    label = None
-    if "--label" in sys.argv:
-        label = sys.argv[sys.argv.index("--label") + 1]
+    label = option("--label")
     llm = None if use_rule else make_llm(load_settings())
     if llm is not None and not llm.can_reason:
         print("LLM_PROVIDER=fake 에서는 모델 평가를 할 수 없습니다. --rule 로 실행하세요.")
@@ -103,6 +105,12 @@ def main():
     for row, picked, wrong, conf in failures:
         detail = "; ".join(wrong) if wrong else f"정답 {row['expected_tools'] or '도구 없음'}, 결과 {picked or '도구 없음'}"
         print(f"  {row['id']} {row['message']}  →  {detail}  (확신도 {conf:.2f})")
+
+    # 평가 게이트: 기준에 못 미치면 실패로 끝낸다. CI 에서 머지를 멈추는 데 쓴다.
+    min_tools, min_args = int(option("--min-tools", 0)), int(option("--min-args", 0))
+    if tool_ok < min_tools or args_ok < min_args:
+        print(f"기준 미달: 도구 {tool_ok} (기준 {min_tools}), 도구와 인자 {args_ok} (기준 {min_args})")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
