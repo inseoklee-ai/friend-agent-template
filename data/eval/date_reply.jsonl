@@ -1,0 +1,24 @@
+{"id": "D01", "kind": "문제", "message": "그럼 오늘은 몇년 몇월 몇일이지?", "history": [], "must_include": ["2026"], "note": "트레이스 52d438b6: 2020년이라고 답함"}
+{"id": "D02", "kind": "문제", "message": "그럼 다시 물을게 오늘은 몇일이지?", "history": [{"role": "user", "content": "오늘 몇 년이야?"}, {"role": "assistant", "content": "오늘은 2020년 11월 9일이야."}, {"role": "user", "content": "거짓말 오늘은 2026년 11월 9일인데"}], "must_include": ["9일"], "note": "트레이스 fc8cc728: 2023년이라고 답함"}
+{"id": "D03", "kind": "문제", "message": "내일이 2014년 7월 21일이지?", "history": [], "must_include": ["2026"], "allow_years": ["2014"], "note": "트레이스 7690a14e: 연도를 바로잡지 않음"}
+{"id": "D04", "kind": "문제", "message": "아 2014년 11월 10일 이구나", "history": [{"role": "user", "content": "내일이 며칠이지?"}, {"role": "assistant", "content": "내일은 11월 10일이야."}], "must_include": ["2026"], "allow_years": ["2014"], "note": "트레이스 36082ea2: '맞아! 2014년'이라고 동의함"}
+{"id": "D05", "kind": "문제", "message": "헐 2023년 아닌데? 올해가 몇 년이냐고", "history": [{"role": "user", "content": "오늘 며칠이야?"}, {"role": "assistant", "content": "오늘은 2023년 11월 9일이야."}], "must_include": ["2026"], "allow_years": ["2023"], "note": "트레이스 5742f17c: 날짜를 되물음"}
+{"id": "D06", "kind": "문제", "message": "올해가 몇 년도지?", "history": [], "must_include": ["2026"], "note": "같은 원인의 변형"}
+{"id": "D07", "kind": "문제", "message": "지금 2020년 맞지?", "history": [], "must_include": ["2026"], "allow_years": ["2020"], "note": "같은 원인의 변형: 틀린 연도에 동의하는지"}
+{"id": "D08", "kind": "문제", "message": "내년은 몇 년이야?", "history": [], "must_include": ["2027"], "allow_years": ["2027"], "note": "올해를 알아야 답할 수 있음"}
+{"id": "D09", "kind": "문제", "message": "1990년생이면 올해 몇 살이야? 만 나이로", "history": [], "allow_years": ["1990"],"must_include_any": ["35", "36"], "note": "올해를 알아야 답할 수 있음"}
+{"id": "D10", "kind": "문제", "message": "오늘 날짜를 연도까지 정확히 말해줘", "history": [], "must_include": ["2026", "11월 9일"], "note": "같은 원인의 변형"}
+{"id": "D11", "kind": "문제", "message": "작년이 몇 년이었지?", "history": [], "must_include": ["2025"], "allow_years": ["2025"], "note": "올해를 알아야 답할 수 있음"}
+{"id": "D12", "kind": "문제", "message": "오늘 날짜 어디서 보고 말하는 거야? 연도도 알려줘", "history": [], "must_include": ["2026"], "note": "트레이스 fa592c82, 5b4956: 근거를 물으면 얼버무림"}
+{"id": "N01", "kind": "정상", "message": "오늘 회의만 4개야 진짜 지친다", "history": [], "must_exclude": ["2026년"], "note": "일상 대화에 연도를 끼워 넣지 않는지"}
+{"id": "N02", "kind": "정상", "message": "심심", "history": [], "must_exclude": ["2026년"], "note": "짧은 말"}
+{"id": "N03", "kind": "정상", "message": "요즘 친구랑 사이가 좀 멀어진 것 같아", "history": [], "must_exclude": ["2026년"], "note": "고민 상담"}
+{"id": "N04", "kind": "정상", "message": "추천할 만한 책 있어?", "history": [], "must_exclude": ["2026년"], "note": "추천"}
+{"id": "N05", "kind": "정상", "message": "너는 누구야?", "history": [], "must_exclude": ["2026년"], "note": "자기소개"}
+{"id": "N06", "kind": "정상", "message": "오늘 기분 별로야", "history": [], "must_exclude": ["2026년"], "note": "위로"}
+{"id": "N07", "kind": "정상", "message": "내일 서울 날씨 어때?", "history": [], "tool_lines": ["서울 내일(2026-11-10) 날씨: 맑음, 최저 2도 최고 10도, 강수 확률 0%."], "must_include": ["맑"], "must_exclude": ["수 없"], "note": "도구 결과를 그대로 전하는지"}
+{"id": "N08", "kind": "정상", "message": "내일 오후 3시에 팀장님 보고 있는 거 알려줘", "history": [], "tool_lines": ["약속을 저장했습니다: 11월 10일(화) 15:00에 '팀장님 보고'."], "must_include": ["3시"], "must_exclude": ["수 없"], "note": "약속 저장 확인"}
+{"id": "N09", "kind": "정상", "message": "내일 무슨 요일이야?", "history": [], "must_include": ["화요일"], "note": "요일 계산은 원래 잘 되던 것"}
+{"id": "N10", "kind": "정상", "message": "모레가 며칠이지?", "history": [], "must_include": ["11일"], "note": "날짜 계산은 원래 잘 되던 것"}
+{"id": "N11", "kind": "정상", "message": "우리 고양이 이름 기억나?", "history": [{"role": "user", "content": "나 고양이 키워 이름은 보리야"}, {"role": "assistant", "content": "보리라는 이름 귀엽다!"}], "must_include": ["보리"], "must_exclude": ["2026년"], "note": "기억"}
+{"id": "N12", "kind": "정상", "message": "ㅋㅋ 고마워 잘자", "history": [], "must_exclude": ["2026년"], "note": "마무리 인사"}
