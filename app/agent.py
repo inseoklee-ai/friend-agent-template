@@ -25,7 +25,7 @@ GREETING_GAP = timedelta(hours=6)  # 마지막 대화 뒤 이만큼 지나면 �
 
 def system_prompt(character, now, location, memories, summary, tool_lines=(), clarify=False):
     parts = [build_persona(character),
-             f"[지금] {when.label(now)} ({now.tzinfo}), 사용자 지역: {location}\n[달력]\n{when.calendar_hint(now)}"]
+             f"[지금] {now.year}년 {when.label(now)} ({now.tzinfo}), 사용자 지역: {location}\n[달력]\n{when.calendar_hint(now)}"]
     block = memory.memory_block(memories, summary)
     if block:
         parts.append(block)
